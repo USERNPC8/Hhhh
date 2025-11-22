@@ -1,64 +1,92 @@
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const multer = require('multer');
 const AdmZip = require('adm-zip');
 const Docker = require('dockerode');
 const fs = require('fs-extra');
 const path = require('path');
 
+// Configuração Inicial
 const app = express();
-const docker = new Docker({ socketPath: '/var/run/docker.sock' }); // No Windows pode precisar ajustar isso
-const upload = multer({ dest: 'temp/' }); // Onde o zip chega primeiro
+const server = http.createServer(app);
+const io = new Server(server); // WebSockets para logs em tempo real
+const docker = new Docker({ socketPath: '/var/run/docker.sock' }); // Windows/Linux padrão
+const upload = multer({ dest: 'temp/' });
 
-app.use(express.static('public')); // Serve o frontend
+app.use(express.static('public'));
 app.use(express.json());
 
-// ROTA PRINCIPAL: Upload e Deploy
-app.post('/upload', upload.single('botFile'), async (req, res) => {
-    const botName = req.body.botName.replace(/\s+/g, '-').toLowerCase(); // Sanitiza o nome
+// Garante que as pastas existem
+fs.ensureDirSync(path.join(__dirname, 'bots'));
+fs.ensureDirSync(path.join(__dirname, 'temp'));
+
+// --- FUNÇÃO: Monitorar Logs em Tempo Real ---
+function attachLogStream(container, botId) {
+    container.logs({
+        follow: true,
+        stdout: true,
+        stderr: true
+    }, (err, stream) => {
+        if (err) return;
+        // Quando o container "falar" algo, enviamos para o site via Socket
+        stream.on('data', (chunk) => {
+            // Limpeza básica de caracteres de controle do Docker
+            const logClean = chunk.toString('utf8').substring(8); 
+            io.to(botId).emit('new-log', logClean);
+        });
+    });
+}
+
+// --- ROTA: Upload e Deploy ---
+app.post('/deploy', upload.single('botFile'), async (req, res) => {
+    const botName = req.body.botName.replace(/[^a-z0-9-]/g, ''); // Sanitiza nome
+    if(!botName) return res.status(400).json({error: "Nome inválido"});
+
     const zipPath = req.file.path;
     const extractPath = path.join(__dirname, 'bots', botName);
 
     try {
-        // 1. Limpeza: Se o bot já existe, removemos a pasta antiga e o container antigo
+        // 1. Limpar instalação anterior
         if (fs.existsSync(extractPath)) {
             await fs.remove(extractPath);
             try {
                 const oldContainer = docker.getContainer(botName);
                 await oldContainer.stop();
                 await oldContainer.remove();
-            } catch (e) { /* Ignora erro se container não existir */ }
+            } catch (e) {}
         }
 
-        // 2. Descompactar o arquivo
+        // 2. Extrair ZIP
         const zip = new AdmZip(zipPath);
         zip.extractAllTo(extractPath, true);
-        fs.unlinkSync(zipPath); // Deleta o zip temporário
+        fs.unlinkSync(zipPath);
 
-        // 3. Verificar se é um bot Node.js (tem package.json?)
+        // 3. Verificar package.json
         if (!fs.existsSync(path.join(extractPath, 'package.json'))) {
-            return res.status(400).json({ error: 'Erro: package.json não encontrado no ZIP!' });
+            return res.status(400).json({ error: 'Arquivo package.json não encontrado!' });
         }
 
-        // 4. CRIAR O CONTAINER DOCKER
-        // O segredo: Usamos "sh -c" para instalar dependências antes de iniciar
+        // 4. Criar Container (Isolamento)
         const container = await docker.createContainer({
-            Image: 'node:18-alpine', 
+            Image: 'node:18-alpine',
             name: botName,
-            Tty: true,
-            Cmd: ['sh', '-c', 'npm install && npm start'], 
+            Tty: false,
+            // Instala dependências e inicia o bot
+            Cmd: ['sh', '-c', 'npm install && npm start'],
             HostConfig: {
-                Binds: [`${extractPath}:/app`], // Liga a pasta do PC ao Container
+                Binds: [`${extractPath}:/app`],
                 WorkingDir: '/app',
-                Memory: 512 * 1024 * 1024, // Limite de 512MB RAM
-                NanoCpus: 1000000000 // Limite de 1 CPU
-            },
-            NetworkMode: 'bridge'
+                Memory: 512 * 1024 * 1024, // 512MB RAM
+                NanoCpus: 1000000000 // 1 CPU
+            }
         });
 
-        // 5. Iniciar
+        // 5. Iniciar e Ligar Logs
         await container.start();
+        attachLogStream(container, botName);
 
-        res.json({ success: true, message: `Bot ${botName} implantado e rodando!` });
+        res.json({ success: true, botId: botName });
 
     } catch (error) {
         console.error(error);
@@ -66,17 +94,15 @@ app.post('/upload', upload.single('botFile'), async (req, res) => {
     }
 });
 
-// Rota para ver logs do bot
-app.get('/logs/:botName', async (req, res) => {
-    try {
-        const container = docker.getContainer(req.params.botName);
-        const logs = await container.logs({ stdout: true, stderr: true, tail: 50 });
-        res.send(logs.toString('utf8'));
-    } catch (error) {
-        res.status(404).send("Bot offline ou não encontrado.");
-    }
+// --- SOCKET: Conexão do Cliente ---
+io.on('connection', (socket) => {
+    // O site pede para "entrar na sala" de um bot específico para ver os logs
+    socket.on('watch-bot', (botId) => {
+        socket.join(botId);
+    });
 });
 
-app.listen(3000, () => {
-    console.log('🚀 Discloud Clone rodando em http://localhost:3000');
+// Iniciar Servidor
+server.listen(3000, () => {
+    console.log('🚀 Servidor de Hospedagem rodando na porta 3000');
 });
