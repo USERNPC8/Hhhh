@@ -1,79 +1,118 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Meu Host de Bots</title>
+    <title>Discloud Clone - Deploy</title>
+    <script src="/socket.io/socket.io.js"></script>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #1e1e2e; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .card { background: #2b2b3b; padding: 2rem; border-radius: 12px; width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
-        h2 { text-align: center; color: #7289da; }
-        input { width: 100%; padding: 10px; margin: 10px 0; border-radius: 6px; border: 1px solid #444; background: #181825; color: white; box-sizing: border-box;}
-        button { width: 100%; padding: 12px; background: #7289da; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.3s; }
-        button:hover { background: #5b6eae; }
-        #status { margin-top: 15px; text-align: center; font-size: 0.9rem; }
-        .logs-area { margin-top: 20px; background: #000; padding: 10px; border-radius: 6px; font-family: monospace; height: 150px; overflow-y: scroll; display: none; font-size: 12px; color: #0f0;}
+        body { background-color: #1e1f22; color: #fff; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; padding-top: 50px; margin: 0; }
+        .container { width: 90%; max-width: 600px; }
+        
+        .card { background: #2b2d31; padding: 20px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }
+        h2 { margin-top: 0; color: #5865f2; }
+        
+        input, button { width: 100%; box-sizing: border-box; margin-bottom: 15px; padding: 12px; border-radius: 5px; border: none; font-size: 16px; }
+        input { background: #1e1f22; color: white; border: 1px solid #444; }
+        button { background: #5865f2; color: white; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        button:hover { background: #4752c4; }
+        button:disabled { background: #444; cursor: not-allowed; }
+
+        /* O TERMINAL */
+        .terminal-window {
+            background: #000;
+            border: 1px solid #444;
+            border-radius: 6px;
+            padding: 15px;
+            height: 300px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Courier New', monospace;
+            font-size: 13px;
+            margin-top: 20px;
+            display: none; /* Escondido até o deploy */
+        }
+        .log-line { margin: 2px 0; white-space: pre-wrap; color: #0f0; }
+        .log-line.system { color: #ffff00; }
     </style>
 </head>
 <body>
 
-<div class="card">
-    <h2>🚀 Upload de Bot</h2>
-    
-    <label>Nome do Bot (ID único)</label>
-    <input type="text" id="botName" placeholder="ex: meu-bot-musica">
+    <div class="container">
+        <div class="card">
+            <h2>📦 Hospedar Bot Node.js</h2>
+            
+            <input type="text" id="botName" placeholder="Nome do Bot (sem espaços)" autocomplete="off">
+            <input type="file" id="botFile" accept=".zip">
+            
+            <button id="btnDeploy" onclick="fazerDeploy()">⬆️ Upload e Iniciar</button>
+            <p id="statusText" style="text-align: center; font-size: 14px; color: #aaa;"></p>
+        </div>
 
-    <label>Arquivo (.zip)</label>
-    <input type="file" id="botFile" accept=".zip">
+        <div id="terminal" class="terminal-window">
+            <div class="log-line system">System: Aguardando conexão...</div>
+        </div>
+    </div>
 
-    <button onclick="uploadBot()">Fazer Upload e Ligar</button>
+    <script>
+        const socket = io();
+        let currentBotId = null;
 
-    <div id="status"></div>
-    
-    <div id="logsContainer" class="logs-area">Aguardando logs...</div>
-    <button onclick="fetchLogs()" style="margin-top:10px; background:#444; display:none;" id="btnLogs">Atualizar Logs</button>
-</div>
+        async function fazerDeploy() {
+            const name = document.getElementById('botName').value.trim();
+            const file = document.getElementById('botFile').files[0];
+            const btn = document.getElementById('btnDeploy');
+            const status = document.getElementById('statusText');
+            const terminal = document.getElementById('terminal');
 
-<script>
-    async function uploadBot() {
-        const name = document.getElementById('botName').value;
-        const file = document.getElementById('botFile').files[0];
-        const status = document.getElementById('status');
+            if (!name || !file) return alert("Preencha o nome e escolha o arquivo!");
 
-        if (!name || !file) return alert("Preencha tudo!");
+            // Interface
+            btn.disabled = true;
+            btn.innerText = "⏳ Enviando...";
+            status.innerText = "Enviando arquivo e criando container...";
+            terminal.style.display = 'block';
+            terminal.innerHTML = '<div class="log-line system">System: Iniciando upload...</div>';
 
-        const formData = new FormData();
-        formData.append('botName', name);
-        formData.append('botFile', file);
+            const formData = new FormData();
+            formData.append('botName', name);
+            formData.append('botFile', file);
 
-        status.innerText = "⏳ Enviando e instalando dependências (pode demorar)...";
-        status.style.color = "yellow";
+            try {
+                const req = await fetch('/deploy', { method: 'POST', body: formData });
+                const res = await req.json();
 
-        try {
-            const req = await fetch('/upload', { method: 'POST', body: formData });
-            const res = await req.json();
-
-            if (res.success) {
-                status.innerText = "✅ " + res.message;
-                status.style.color = "#0f0";
-                document.getElementById('logsContainer').style.display = 'block';
-                document.getElementById('btnLogs').style.display = 'block';
-            } else {
-                throw new Error(res.error);
+                if (res.success) {
+                    status.innerText = "✅ Upload concluído! Instalando dependências...";
+                    currentBotId = res.botId;
+                    
+                    // Conecta no WebSocket para ouvir este bot
+                    socket.emit('watch-bot', currentBotId);
+                    
+                    addLog("System: Conectado ao stream de logs do container.", true);
+                } else {
+                    throw new Error(res.error);
+                }
+            } catch (err) {
+                status.innerText = "❌ Erro: " + err.message;
+                addLog("Erro fatal: " + err.message, true);
+                btn.disabled = false;
+                btn.innerText = "Tentar Novamente";
             }
-        } catch (err) {
-            status.innerText = "❌ Erro: " + err.message;
-            status.style.color = "red";
         }
-    }
 
-    async function fetchLogs() {
-        const name = document.getElementById('botName').value;
-        const req = await fetch('/logs/' + name);
-        const text = await req.text();
-        document.getElementById('logsContainer').innerText = text || "Container iniciando...";
-    }
-</script>
+        // Recebe logs do servidor em tempo real
+        socket.on('new-log', (msg) => {
+            addLog(msg);
+        });
 
+        function addLog(msg, isSystem = false) {
+            const term = document.getElementById('terminal');
+            const div = document.createElement('div');
+            div.className = isSystem ? 'log-line system' : 'log-line';
+            div.innerText = msg;
+            term.appendChild(div);
+            term.scrollTop = term.scrollHeight; // Rola para o final
+        }
+    </script>
 </body>
 </html>
